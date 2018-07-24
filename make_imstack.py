@@ -19,9 +19,9 @@ STAMP_SIZE=16
 SLICE = [0, 0, slice(None, None, None), slice(None, None, None)]
 HDU = 0
 PB_THRESHOLD = 0.1 # fraction of pbmax
-#SUFFIXES=["image", "model", "dirty"]
 SUFFIXES="image,model"
-N_TIMESTEPS=591
+#N_TIMESTEPS=591
+N_TIMESTEPS=50
 N_CHANNELS=1
 DTYPE = np.float16
 FILENAME="{obsid}-t{time:04d}-{pol}-{suffix}.fits"
@@ -189,7 +189,8 @@ with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
 ##------------------------------------------------------------------
 
         for s, suffix in enumerate(opts.suffixes):
-            data = group.create_dataset(suffix, data_shape, chunks=chunks, dtype=DTYPE, compression='gzip', shuffle=True)
+          #  data = group.create_dataset(suffix, data_shape, chunks=chunks, dtype=DTYPE, compression='gzip', shuffle=True)
+            data = group.create_dataset(suffix, data_shape, chunks=True, dtype=DTYPE )
             filenames = group.create_dataset("%s_filenames" % suffix, (len(opts.pols), N_CHANNELS, opts.n), dtype="S%d" % len(header_file), compression='gzip')
         
             n_rows = image_size/opts.n_pass
