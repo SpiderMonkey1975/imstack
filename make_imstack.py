@@ -3,8 +3,11 @@ import os, datetime, logging
 import numpy as np
 from optparse import OptionParser #NB zeus does not have argparse!
 from astropy.io import fits
-
 from h5py_cache import File
+
+##
+## Define some necessary parameters
+##----------------------------------
 
 VERSION = "0.1"
 CACHE_SIZE=30 #GB
@@ -26,6 +29,11 @@ FILENAME_BAND="{obsid}_{band}-t{time:04d}-{pol}-{suffix}.fits"
 PB_FILE="{obsid}-{pol}-beam.fits"
 PB_FILE_BAND="{obsid}_{band}-{pol}-beam.fits"
 
+
+##
+## Define some useful commandline arguments
+##------------------------------------------
+
 parser = OptionParser(usage = "usage: obsid" +
 """
     Convert a set of wsclean images into an hdf5 image cube
@@ -42,6 +50,11 @@ parser.add_option("--pb_thresh", default=PB_THRESHOLD, dest="pb_thresh", type="f
 parser.add_option("--stamp_size", default=STAMP_SIZE, dest="stamp_size", type="int", help="hdf5 stamp size [default: %default]")
 parser.add_option("--skip_check_wsc_timesteps", action="store_true", dest="skip_check_wcs_timesteps", help="don't check WSClean timesteps")
 parser.add_option("-v", "--verbose", action="count", dest="verbose", help="-v info, -vv debug")
+
+
+##
+## Parse any commandline arguments given by the user
+##---------------------------------------------------
 
 opts, args = parser.parse_args()
 
@@ -74,6 +87,11 @@ else:
 if opts.skip_check_wcs_timesteps:
     logging.warn("Warning: not checking timesteps. Checking verbose output carefully is recommended!")
 
+
+##
+## Check if all required input files are present
+##-----------------------------------------------
+
 for band in opts.bands:
     for suffix in opts.suffixes:
         for t in xrange(opts.start, opts.n+opts.start):
@@ -86,11 +104,18 @@ for band in opts.bands:
                     raise IOError, "couldn't find file %s" % infile
                 logging.debug("%s found", infile)
 
+##
+## Create a new HDF5 with a chunk cache of specified size
+##--------------------------------------------------------
+
 with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
     df.attrs['VERSION'] = VERSION
     df.attrs['USER'] = os.environ['USER']
     df.attrs['DATE_CREATED'] = datetime.datetime.utcnow().isoformat()
 
+##
+## Separate each frequency band into its own group in the HDF5 file
+##------------------------------------------------------------------ 
     for band in opts.bands:
         if band is None:
             group = df['/']
@@ -101,7 +126,11 @@ with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
             group = df[band]
         group.attrs['TIME_INTERVAL'] = opts.step
 
-        # determine data size and structure 
+##
+## Determine the dimensionality of the datasets and chunks.  Also determine the
+## size of the datasets and chunk in each of these dimensions.
+##------------------------------------------------------------------------------
+
         if band is None:
             image_file = FILENAME.format(obsid=obsid, time=opts.start, pol=opts.pols[0], suffix=opts.suffixes[0])
         else:
@@ -111,6 +140,11 @@ with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
         assert image_size % opts.stamp_size== 0, "image_size must be divisible by stamp_size"
         data_shape = [len(opts.pols), image_size, image_size, N_CHANNELS, opts.n]
         chunks = (len(opts.pols), opts.stamp_size, opts.stamp_size, N_CHANNELS, opts.n)
+
+##
+## Read in beam shape data and attributes from appropriate FITS files and write into the
+## new HDF5 file.
+##---------------------------------------------------------------------------------------
 
         beam_shape = data_shape[:-1] + [1] # just one beam for all timesteps for now
         beam = group.create_dataset("beam", beam_shape, dtype=np.float32, compression='gzip', shuffle=True)
@@ -122,27 +156,39 @@ with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
             beam[p, :, :, 0, 0] = hdus[HDU].data[SLICE]
             for key, item in hdus[0].header.iteritems():
                 beam.attrs[key] = item
+
+##
+## Check for the presence of NaNs in the beam data
+##-------------------------------------------------
+
         pb_sum = np.sqrt(np.sum(beam[...]**2, axis=0)/len(opts.pols))
         pb_mask = pb_sum > opts.pb_thresh*np.nanmax(pb_sum)
         pb_nan = pb_sum/pb_sum
         if np.any(np.isnan(pb_sum)):
             logging.warn("NaNs in primary beam")
 
-        # write main header information
+##
+## Read in header infromation from appropriate FITS files and output to the new HDF5 file
+##----------------------------------------------------------------------------------------
+
         timesteps = group.create_dataset("WSCTIMES", (opts.n,), dtype=np.uint16)
         timesteps2 = group.create_dataset("WSCTIMEE", (opts.n,), dtype=np.uint16)
         if band is None:
             header_file = FILENAME.format(obsid=obsid, time=opts.n//2, pol=opts.pols[0], suffix=opts.suffixes[0])
         else:
             header_file = FILENAME_BAND.format(obsid=obsid, band=band, time=opts.n//2, pol=opts.pols[0], suffix=opts.suffixes[0])
-        # add fits header to attributes
+        
         hdus = fits.open(header_file, memmap=True)
         header = group.create_dataset('header', data=[], dtype=DTYPE)
         for key, item in hdus[0].header.iteritems():
             header.attrs[key] = item
 
+##
+## Create a new compressed dataset for each type of output datafile
+## Record the names of the original FITS files.
+##------------------------------------------------------------------
+
         for s, suffix in enumerate(opts.suffixes):
-            # gzip is rather slower than lzf, but is more standard in hdf5. Will allow dumping to h5dump etc.
             data = group.create_dataset(suffix, data_shape, chunks=chunks, dtype=DTYPE, compression='gzip', shuffle=True)
             filenames = group.create_dataset("%s_filenames" % suffix, (len(opts.pols), N_CHANNELS, opts.n), dtype="S%d" % len(header_file), compression='gzip')
         
@@ -150,10 +196,19 @@ with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
             for i in range(opts.n_pass):
                 logging.info("processing segment %d/%d" % (i+1, opts.n_pass))
                 for t in xrange(opts.n):
+
+##
+## Determine which part of the FITS input file needs to be read
+##--------------------------------------------------------------
+
                     im_slice = [slice(n_rows*i, n_rows*(i+1)), slice(None, None, None)]
                     fits_slice = SLICE[:-2] + im_slice
 
                     for p, pol in enumerate(opts.pols):
+
+##
+## Read in data from the appropriate input FITS file
+##---------------------------------------------------
 
                         if band is None:
                             infile = FILENAME.format(obsid=obsid, time=t+opts.start, pol=pol, suffix=suffix)
@@ -161,13 +216,20 @@ with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
                             infile = FILENAME_BAND.format(obsid=obsid, band=band, time=t+opts.start, pol=pol, suffix=suffix)
                         logging.info(" processing %s", infile)
                         hdus = fits.open(infile, memmap=True)
+
+##
+## Write data into the new HDF5 datasets.  Filter the data array to remove data points where the beam shape is a NaN
+##-------------------------------------------------------------------------------------------------------------------
+
                         filenames[p, 0, t] = infile
-                        print data[p, n_rows*i:n_rows*(i+1), :, 0, t].shape
-                        print hdus[0].data[fits_slice].shape
-                        print pb_mask.shape
                         data[p, n_rows*i:n_rows*(i+1), :, 0, t] = np.where(pb_mask[n_rows*i:n_rows*(i+1), :, 0, 0],
                                                                            hdus[0].data[fits_slice],
                                                                            np.nan)*pb_nan[n_rows*i:n_rows*(i+1), :, 0, 0]
+
+##
+## Update timestep information in the new HDF5 file
+##--------------------------------------------------
+
                         if s==0 and p==0:
                             timesteps[t] = hdus[0].header['WSCTIMES']
                             timesteps2[t] = hdus[0].header['WSCTIMEE']
