@@ -137,23 +137,24 @@ with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
             image_file = FILENAME_BAND.format(obsid=obsid, band=band, time=opts.start, pol=opts.pols[0], suffix=opts.suffixes[0])
         hdus = fits.open(image_file, memmap=True)
         image_size = hdus[HDU].data.shape[-1]
-        assert image_size % opts.stamp_size== 0, "image_size must be divisible by stamp_size"
-        data_shape = [len(opts.pols), image_size, image_size, N_CHANNELS, opts.n]
-        chunks = (len(opts.pols), opts.stamp_size, opts.stamp_size, N_CHANNELS, opts.n)
+        data_shape = [image_size, image_size, opts.n]
 
 ##
 ## Read in beam shape data and attributes from appropriate FITS files and write into the
 ## new HDF5 file.
 ##---------------------------------------------------------------------------------------
 
-        beam_shape = data_shape[:-1] + [1] # just one beam for all timesteps for now
-        beam = group.create_dataset("beam", beam_shape, dtype=np.float32, compression='gzip', shuffle=True)
+        beam_shape = [image_size, image_size]
+        beam_dataset_name = "beam-{pol}"
         for p, pol in enumerate(opts.pols):
+            dname = beam_dataset_name.format(pol=pol)
+            beam = group.create_dataset(dname, beam_shape, dtype=np.float32, compression="gzip")
             if band is None:
                 hdus = fits.open(PB_FILE.format(obsid=obsid, pol=pol), memmap=True)
             else:
                 hdus = fits.open(PB_FILE_BAND.format(obsid=obsid, band=band, pol=pol), memmap=True)
-            beam[p, :, :, 0, 0] = hdus[HDU].data[SLICE]
+         
+            beam[:, :] = hdus[HDU].data[SLICE]
             for key, item in hdus[0].header.iteritems():
                 beam.attrs[key] = item
 
@@ -161,11 +162,11 @@ with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
 ## Check for the presence of NaNs in the beam data
 ##-------------------------------------------------
 
-        pb_sum = np.sqrt(np.sum(beam[...]**2, axis=0)/len(opts.pols))
-        pb_mask = pb_sum > opts.pb_thresh*np.nanmax(pb_sum)
-        pb_nan = pb_sum/pb_sum
-        if np.any(np.isnan(pb_sum)):
-            logging.warn("NaNs in primary beam")
+#        pb_sum = np.sqrt(np.sum(beam[...]**2, axis=0)/len(opts.pols))
+#        pb_mask = pb_sum > opts.pb_thresh*np.nanmax(pb_sum)
+#        pb_nan = pb_sum/pb_sum
+#        if np.any(np.isnan(pb_sum)):
+#            logging.warn("NaNs in primary beam")
 
 ##
 ## Read in header infromation from appropriate FITS files and output to the new HDF5 file
@@ -184,49 +185,18 @@ with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
             header.attrs[key] = item
 
 ##
-## Create a new compressed dataset for each type of output datafile
-## Record the names of the original FITS files.
+## Record the names of the original input FITS files.
 ##------------------------------------------------------------------
-
         for s, suffix in enumerate(opts.suffixes):
-          #  data = group.create_dataset(suffix, data_shape, chunks=chunks, dtype=DTYPE, compression='gzip', shuffle=True)
-            data = group.create_dataset(suffix, data_shape, chunks=True, dtype=DTYPE )
-            filenames = group.create_dataset("%s_filenames" % suffix, (len(opts.pols), N_CHANNELS, opts.n), dtype="S%d" % len(header_file), compression='gzip')
-        
-            n_rows = image_size/opts.n_pass
+            filenames = group.create_dataset("%s_filenames" % suffix, (len(opts.pols), N_CHANNELS, opts.n), dtype="S%d" % len(header_file))
             for i in range(opts.n_pass):
-                logging.info("processing segment %d/%d" % (i+1, opts.n_pass))
                 for t in xrange(opts.n):
-
-##
-## Determine which part of the FITS input file needs to be read
-##--------------------------------------------------------------
-
-                    im_slice = [slice(n_rows*i, n_rows*(i+1)), slice(None, None, None)]
-                    fits_slice = SLICE[:-2] + im_slice
-
                     for p, pol in enumerate(opts.pols):
-
-##
-## Read in data from the appropriate input FITS file
-##---------------------------------------------------
-
                         if band is None:
                             infile = FILENAME.format(obsid=obsid, time=t+opts.start, pol=pol, suffix=suffix)
                         else:
                             infile = FILENAME_BAND.format(obsid=obsid, band=band, time=t+opts.start, pol=pol, suffix=suffix)
-                        logging.info(" processing %s", infile)
-                        hdus = fits.open(infile, memmap=True)
-
-##
-## Write data into the new HDF5 datasets.  Filter the data array to remove data points where the beam shape is a NaN
-##-------------------------------------------------------------------------------------------------------------------
-
-                        filenames[p, 0, t] = infile
-                        data[p, n_rows*i:n_rows*(i+1), :, 0, t] = np.where(pb_mask[n_rows*i:n_rows*(i+1), :, 0, 0],
-                                                                           hdus[0].data[fits_slice],
-                                                                           np.nan)*pb_nan[n_rows*i:n_rows*(i+1), :, 0, 0]
-
+                        filenames[p, 0, t] = infile  
 ##
 ## Update timestep information in the new HDF5 file
 ##--------------------------------------------------
@@ -242,3 +212,42 @@ with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
                             else:
                                 logging.debug(hdus[0].header['DATE-OBS'])
                                 logging.debug(hdus[0].header['DATE-OBS'])
+
+##
+## Construct the necessary datasets to hold the image data
+##---------------------------------------------------------
+
+        for s, suffix in enumerate(opts.suffixes):
+            for p, pol in enumerate(opts.pols):
+                dname = "{suffix}-{pol}".format(suffix=suffix,pol=pol)
+                data = group.create_dataset(dname, data_shape, compression="gzip", dtype=DTYPE )
+
+##
+## Read in data from the appropriate input FITS file
+##---------------------------------------------------
+
+        for s, suffix in enumerate(opts.suffixes):
+            n_rows = image_size/opts.n_pass
+            for i in range(opts.n_pass):
+                logging.info("processing segment %d/%d" % (i+1, opts.n_pass))
+                im_slice = [slice(n_rows*i, n_rows*(i+1)), slice(None, None, None)]
+                fits_slice = SLICE[:-2] + im_slice
+
+                for p, pol in enumerate(opts.pols):
+                    dname = "{suffix}-{pol}".format(suffix=suffix,pol=pol)
+                    dset = group[dname]
+                    for t in xrange(opts.n):
+
+                        if band is None:
+                            infile = FILENAME.format(obsid=obsid, time=t+opts.start, pol=pol, suffix=suffix)
+                        else:
+                            infile = FILENAME_BAND.format(obsid=obsid, band=band, time=t+opts.start, pol=pol, suffix=suffix)
+                        logging.info(" processing %s", infile)
+                        hdus = fits.open(infile, memmap=True)
+
+##
+## Write data into the new HDF5 datasets.  Filter the data array to remove data points where the beam shape is a NaN
+##-------------------------------------------------------------------------------------------------------------------
+
+                        dset[n_rows*i:n_rows*(i+1), :, t] = hdus[0].data[fits_slice]
+
