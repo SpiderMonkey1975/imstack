@@ -1,16 +1,15 @@
 #!/usr/bin/env python
-import os, datetime, logging
+import os, datetime, logging, h5py, contextlib
 import numpy as np
-from optparse import OptionParser #NB zeus does not have argparse!
+from optparse import OptionParser 
 from astropy.io import fits
-from h5py_cache import File
 
 ##
 ## Define some necessary parameters
 ##----------------------------------
 
 VERSION = "0.1"
-CACHE_SIZE=30 #GB
+CACHE_SIZE=8 
 N_PASS=1
 TIME_INTERVAL=0.5
 TIME_INDEX=1
@@ -71,12 +70,6 @@ elif opts.verbose > 1:
 if opts.outfile is None:
     opts.outfile = "%d.hdf5" % obsid
 
-if os.path.exists(opts.outfile):
-    logging.warn("Warning: editing existing file")
-    file_mode = "r+"
-else:
-    file_mode = "w"
-
 opts.suffixes = opts.suffixes.split(',')
 opts.pols = opts.pols.split(',')
 if opts.bands is None:
@@ -92,162 +85,180 @@ if opts.skip_check_wcs_timesteps:
 ## Check if all required input files are present
 ##-----------------------------------------------
 
-for band in opts.bands:
-    for suffix in opts.suffixes:
-        for t in xrange(opts.start, opts.n+opts.start):
-            for p in opts.pols:
-                if band is None:
-                    infile = FILENAME.format(obsid=obsid, time=t, pol=p, suffix=suffix)
-                else:
-                    infile = FILENAME_BAND.format(obsid=obsid, band=band, time=t, pol=p, suffix=suffix)
-                if not os.path.exists(infile):
-                    raise IOError, "couldn't find file %s" % infile
-                logging.debug("%s found", infile)
+if opts.bands is None:
+   for band in opts.bands:
+       for suffix in opts.suffixes:
+           for t in xrange(opts.start, opts.n+opts.start):
+               infile = FILENAME.format(obsid=obsid, time=t, pol=p, suffix=suffix)
+               if not os.path.exists(infile):
+                  raise IOError, "couldn't find file %s" % infile
+               logging.debug("%s found", infile)
+else:
+   for band in opts.bands:
+       for suffix in opts.suffixes:
+           for t in xrange(opts.start, opts.n+opts.start):
+               for p in opts.pols:
+                   infile = FILENAME_BAND.format(obsid=obsid, band=band, time=t, pol=p, suffix=suffix)
+                   if not os.path.exists(infile):
+                      raise IOError, "couldn't find file %s" % infile
+                      logging.debug("%s found", infile)
+
 
 ##
 ## Create a new HDF5 with a chunk cache of specified size
 ##--------------------------------------------------------
 
-with File(opts.outfile, file_mode, 0.9*CACHE_SIZE*1024**3, 1) as df:
-    df.attrs['VERSION'] = VERSION
-    df.attrs['USER'] = os.environ['USER']
-    df.attrs['DATE_CREATED'] = datetime.datetime.utcnow().isoformat()
+propfaid = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+settings = list(propfaid.get_cache())
+settings[2] *= CACHE_SIZE 
+propfaid.set_cache(*settings)
+
+if os.path.exists(opts.outfile):
+    logging.warn("Warning: hdf5 file exists -overwriting")
+
+with contextlib.closing(h5py.h5f.create(opts.outfile, fapl=propfaid)) as fid:
+     df = h5py.File(fid,'w')
+
 
 ##
 ## Separate each frequency band into its own group in the HDF5 file
 ##------------------------------------------------------------------ 
-    for band in opts.bands:
-        if band is None:
-            group = df['/']
-        elif not band in df.keys():
-            group = df.create_group(band)
-        else:
-            logging.warn("Warning, overwriting existing band %s", band)
-            group = df[band]
-        group.attrs['TIME_INTERVAL'] = opts.step
+for band in opts.bands:
+    if band is None:
+       group = df['/']
+    else:
+       group = df.create_group(band)
+    group.attrs['TIME_INTERVAL'] = opts.step
+
 
 ##
 ## Determine the dimensionality of the datasets and chunks.  Also determine the
 ## size of the datasets and chunk in each of these dimensions.
 ##------------------------------------------------------------------------------
 
-        if band is None:
-            image_file = FILENAME.format(obsid=obsid, time=opts.start, pol=opts.pols[0], suffix=opts.suffixes[0])
-        else:
-            image_file = FILENAME_BAND.format(obsid=obsid, band=band, time=opts.start, pol=opts.pols[0], suffix=opts.suffixes[0])
-        hdus = fits.open(image_file, memmap=True)
-        image_size = hdus[HDU].data.shape[-1]
-        data_shape = [image_size, image_size, opts.n]
+    if band is None:
+       image_file = FILENAME.format(obsid=obsid, time=opts.start, pol=opts.pols[0], suffix=opts.suffixes[0])
+    else:
+       image_file = FILENAME_BAND.format(obsid=obsid, band=band, time=opts.start, pol=opts.pols[0], suffix=opts.suffixes[0])
+
+    hdus = fits.open(image_file, memmap=True)
+    image_size = hdus[HDU].data.shape[-1]
+    data_shape = [image_size, image_size, opts.n]
+
 
 ##
 ## Read in beam shape data and attributes from appropriate FITS files and write into the
 ## new HDF5 file.
 ##---------------------------------------------------------------------------------------
 
-        beam_shape = [image_size, image_size]
-        beam_dataset_name = "beam-{pol}"
-        for p, pol in enumerate(opts.pols):
-            dname = beam_dataset_name.format(pol=pol)
-            beam = group.create_dataset(dname, beam_shape, dtype=np.float32, compression="gzip")
-            if band is None:
-                hdus = fits.open(PB_FILE.format(obsid=obsid, pol=pol), memmap=True)
-            else:
-                hdus = fits.open(PB_FILE_BAND.format(obsid=obsid, band=band, pol=pol), memmap=True)
+    beam_shape = [image_size, image_size]
+    pb_sum = np.zeros( beam_shape )
+    beam_dataset_name = "beam-{pol}"
+    for p, pol in enumerate(opts.pols):
+        dname = beam_dataset_name.format(pol=pol)
+        beam = group.create_dataset(dname, beam_shape, dtype=np.float32, compression="gzip")
+        if band is None:
+           hdus = fits.open(PB_FILE.format(obsid=obsid, pol=pol), memmap=True)
+        else:
+           hdus = fits.open(PB_FILE_BAND.format(obsid=obsid, band=band, pol=pol), memmap=True)
          
-            beam[:, :] = hdus[HDU].data[SLICE]
-            for key, item in hdus[0].header.iteritems():
-                beam.attrs[key] = item
+        beam[:, :] = hdus[HDU].data[SLICE]
+        for key, item in hdus[0].header.iteritems():
+            beam.attrs[key] = item
+        pb_sum = pb_sum + np.sum(beam)
+
 
 ##
 ## Check for the presence of NaNs in the beam data
 ##-------------------------------------------------
 
-#        pb_sum = np.sqrt(np.sum(beam[...]**2, axis=0)/len(opts.pols))
-#        pb_mask = pb_sum > opts.pb_thresh*np.nanmax(pb_sum)
-#        pb_nan = pb_sum/pb_sum
-#        if np.any(np.isnan(pb_sum)):
-#            logging.warn("NaNs in primary beam")
+    pb_sum = np.sqrt(pb_sum)/len(opts.pols)
+    pb_mask = pb_sum > opts.pb_thresh*np.nanmax(pb_sum)
+    pb_nan = pb_sum/pb_sum
+    if np.any(np.isnan(pb_sum)):
+       logging.warn("NaNs in primary beam")
 
 ##
 ## Read in header infromation from appropriate FITS files and output to the new HDF5 file
 ##----------------------------------------------------------------------------------------
 
-        timesteps = group.create_dataset("WSCTIMES", (opts.n,), dtype=np.uint16)
-        timesteps2 = group.create_dataset("WSCTIMEE", (opts.n,), dtype=np.uint16)
-        if band is None:
-            header_file = FILENAME.format(obsid=obsid, time=opts.n//2, pol=opts.pols[0], suffix=opts.suffixes[0])
-        else:
-            header_file = FILENAME_BAND.format(obsid=obsid, band=band, time=opts.n//2, pol=opts.pols[0], suffix=opts.suffixes[0])
+    timesteps = group.create_dataset("WSCTIMES", (opts.n,), dtype=np.uint16)
+    timesteps2 = group.create_dataset("WSCTIMEE", (opts.n,), dtype=np.uint16)
+    if band is None:
+       header_file = FILENAME.format(obsid=obsid, time=opts.n//2, pol=opts.pols[0], suffix=opts.suffixes[0])
+    else:
+       header_file = FILENAME_BAND.format(obsid=obsid, band=band, time=opts.n//2, pol=opts.pols[0], suffix=opts.suffixes[0])
         
-        hdus = fits.open(header_file, memmap=True)
-        header = group.create_dataset('header', data=[], dtype=DTYPE)
-        for key, item in hdus[0].header.iteritems():
-            header.attrs[key] = item
+    hdus = fits.open(header_file, memmap=True)
+    header = group.create_dataset('header', data=[], dtype=DTYPE)
+    for key, item in hdus[0].header.iteritems():
+        header.attrs[key] = item
 
 ##
 ## Record the names of the original input FITS files.
 ##------------------------------------------------------------------
-        for s, suffix in enumerate(opts.suffixes):
-            filenames = group.create_dataset("%s_filenames" % suffix, (len(opts.pols), N_CHANNELS, opts.n), dtype="S%d" % len(header_file))
-            for i in range(opts.n_pass):
-                for t in xrange(opts.n):
-                    for p, pol in enumerate(opts.pols):
-                        if band is None:
-                            infile = FILENAME.format(obsid=obsid, time=t+opts.start, pol=pol, suffix=suffix)
-                        else:
-                            infile = FILENAME_BAND.format(obsid=obsid, band=band, time=t+opts.start, pol=pol, suffix=suffix)
-                        filenames[p, 0, t] = infile  
+    for s, suffix in enumerate(opts.suffixes):
+        filenames = group.create_dataset("%s_filenames" % suffix, (len(opts.pols), N_CHANNELS, opts.n), dtype="S%d" % len(header_file))
+        for i in range(opts.n_pass):
+            for t in xrange(opts.n):
+                for p, pol in enumerate(opts.pols):
+                    if band is None:
+                       infile = FILENAME.format(obsid=obsid, time=t+opts.start, pol=pol, suffix=suffix)
+                    else:
+                       infile = FILENAME_BAND.format(obsid=obsid, band=band, time=t+opts.start, pol=pol, suffix=suffix)
+                    filenames[p, 0, t] = infile  
 ##
 ## Update timestep information in the new HDF5 file
 ##--------------------------------------------------
 
-                        if s==0 and p==0:
-                            timesteps[t] = hdus[0].header['WSCTIMES']
-                            timesteps2[t] = hdus[0].header['WSCTIMEE']
-                        else:
-                            # NB these are *not* enforced across different frequency bands, but these could, in principle, have different TIME_INTERVALS
-                            if not opts.skip_check_wcs_timesteps:
-                                assert timesteps[t] == hdus[0].header['WSCTIMES'], "Timesteps do not match %s in %s" % (opts.suffixes[0], infile)
-                                assert timesteps2[t] == hdus[0].header['WSCTIMEE'], "Timesteps do not match %s in %s" % (opts.suffixes[0], infile)
-                            else:
-                                logging.debug(hdus[0].header['DATE-OBS'])
-                                logging.debug(hdus[0].header['DATE-OBS'])
+                    if s==0 and p==0:
+                       timesteps[t] = hdus[0].header['WSCTIMES']
+                       timesteps2[t] = hdus[0].header['WSCTIMEE']
+                    else:
+                       if not opts.skip_check_wcs_timesteps:
+                          assert timesteps[t] == hdus[0].header['WSCTIMES'], "Timesteps do not match %s in %s" % (opts.suffixes[0], infile)
+                          assert timesteps2[t] == hdus[0].header['WSCTIMEE'], "Timesteps do not match %s in %s" % (opts.suffixes[0], infile)
+                       else:
+                          logging.debug(hdus[0].header['DATE-OBS'])
+                          logging.debug(hdus[0].header['DATE-OBS'])
 
 ##
 ## Construct the necessary datasets to hold the image data
 ##---------------------------------------------------------
 
-        for s, suffix in enumerate(opts.suffixes):
-            for p, pol in enumerate(opts.pols):
-                dname = "{suffix}-{pol}".format(suffix=suffix,pol=pol)
-                data = group.create_dataset(dname, data_shape, compression="gzip", dtype=DTYPE )
+    for s, suffix in enumerate(opts.suffixes):
+        for p, pol in enumerate(opts.pols):
+            dname = "{suffix}-{pol}".format(suffix=suffix,pol=pol)
+            data = group.create_dataset(dname, data_shape, compression="gzip", dtype=DTYPE )
 
 ##
 ## Read in data from the appropriate input FITS file
 ##---------------------------------------------------
 
-        for s, suffix in enumerate(opts.suffixes):
-            n_rows = image_size/opts.n_pass
-            for i in range(opts.n_pass):
-                logging.info("processing segment %d/%d" % (i+1, opts.n_pass))
-                im_slice = [slice(n_rows*i, n_rows*(i+1)), slice(None, None, None)]
-                fits_slice = SLICE[:-2] + im_slice
+    for s, suffix in enumerate(opts.suffixes):
+        n_rows = image_size/opts.n_pass
+        for i in range(opts.n_pass):
+            logging.info("processing segment %d/%d" % (i+1, opts.n_pass))
+            im_slice = [slice(n_rows*i, n_rows*(i+1)), slice(None, None, None)]
+            fits_slice = SLICE[:-2] + im_slice
 
-                for p, pol in enumerate(opts.pols):
-                    dname = "{suffix}-{pol}".format(suffix=suffix,pol=pol)
-                    dset = group[dname]
-                    for t in xrange(opts.n):
+        for p, pol in enumerate(opts.pols):
+            dname = "{suffix}-{pol}".format(suffix=suffix,pol=pol)
+            dset = group[dname]
+            for t in xrange(opts.n):
 
-                        if band is None:
-                            infile = FILENAME.format(obsid=obsid, time=t+opts.start, pol=pol, suffix=suffix)
-                        else:
-                            infile = FILENAME_BAND.format(obsid=obsid, band=band, time=t+opts.start, pol=pol, suffix=suffix)
-                        logging.info(" processing %s", infile)
-                        hdus = fits.open(infile, memmap=True)
+                if band is None:
+                   infile = FILENAME.format(obsid=obsid, time=t+opts.start, pol=pol, suffix=suffix)
+                else:
+                   infile = FILENAME_BAND.format(obsid=obsid, band=band, time=t+opts.start, pol=pol, suffix=suffix)
+                logging.info(" processing %s", infile)
+                hdus = fits.open(infile, memmap=True)
 
 ##
 ## Write data into the new HDF5 datasets.  Filter the data array to remove data points where the beam shape is a NaN
 ##-------------------------------------------------------------------------------------------------------------------
 
-                        dset[n_rows*i:n_rows*(i+1), :, t] = hdus[0].data[fits_slice]
+                dset[n_rows*i:n_rows*(i+1), :, t] = np.where( pb_mask[n_rows*i:n_rows*(i+1), :], 
+                                                              hdus[0].data[fits_slice],
+                                                              np.nan ) * pb_nan[n_rows*i:n_rows*(i+1), :] 
 
