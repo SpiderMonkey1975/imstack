@@ -9,7 +9,7 @@ from astropy.io import fits
 ##----------------------------------
 
 VERSION = "0.1"
-CACHE_SIZE=8 
+CACHE_SIZE=1024 
 N_PASS=1
 TIME_INTERVAL=0.5
 TIME_INDEX=1
