@@ -3,16 +3,30 @@
 #SBATCH --job-name=imstack_test
 #SBATCH --nodes=1
 #SBATCH --ntasks=16
-#SBATCH --time=02:00:00
+#SBATCH --time=00:10:00
 #SBATCH --account=pawsey0001
-##SBATCH --partition=debugq
-#SBATCH --export=NONE
+#SBATCH --partition=debugq
+#SBATCH --export=MYSCRATCH
 
 ##
 ## Set the environment
 ##----------------------------------------
 module unload gcc/4.8.5 sandybridge
 module load broadwell gcc/4.8.5 python h5py h5py-cache astropy
+
+##
+## Setup working directory
+##-------------------------
+workdir=${MYSCRATCH}/imstack
+if [ -d "${workdir}" ]; then
+   rm -rf ${workdir}
+fi
+mkdir ${workdir} 
+lfs setstripe -c 2 ${workdir}
+
+cp make_imstack.py ${workdir}
+cd ${workdir}
+ln -s /group/mwasci/jmorgan/ips/make_imstack_test/*.fits .
 
 ##
 ## Run the simulation
